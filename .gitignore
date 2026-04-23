@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+kia_model_overrides.json
+kia_models_source.json
 test_kia_models_parser.py
 template_nextbot.py
 System Prompt.txt

@@ -9,9 +9,10 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
+from urllib.request import Request, urlopen
 
-from kia_models_parser import DEFAULT_OUTPUT_PATH, scrape_once
+from kia_models_parser import DEFAULT_OUTPUT_PATH, scrape_once, write_json_atomic
 
 
 LOGGER = logging.getLogger("kia_models_service")
@@ -24,13 +25,22 @@ IS_RENDER = os.getenv("RENDER") == "true"
 DEFAULT_CACHE_PATH = Path("/tmp/kia_models.json") if IS_RENDER else DEFAULT_OUTPUT_PATH
 
 CACHE_PATH = Path(os.getenv("KIA_MODELS_OUTPUT", str(DEFAULT_CACHE_PATH)))
+SOURCE_CACHE_PATH = Path(os.getenv("KIA_MODELS_SOURCE_OUTPUT", str(CACHE_PATH.with_name("kia_models_source.json"))))
 SEED_PATH = Path(os.getenv("KIA_MODELS_SEED_PATH", str(DEFAULT_OUTPUT_PATH)))
+OVERRIDES_PATH = Path(os.getenv("KIA_MODEL_OVERRIDES_PATH", str(CACHE_PATH.with_name("kia_model_overrides.json"))))
 REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", str(DEFAULT_REFRESH_INTERVAL_SECONDS)))
 SCRAPE_TIMEOUT_SECONDS = int(os.getenv("SCRAPE_TIMEOUT_SECONDS", str(DEFAULT_SCRAPE_TIMEOUT_SECONDS)))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+KIA_LOGS_CHAT_ID = os.getenv("KIA_LOGS_CHAT_ID", "")
+TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
+CHANGE_FIELDS = {"price", "price_list_url", "brochure_url", "model_url", "options_url"}
+WATCHED_FIELDS = ("price", "price_list_url", "brochure_url")
 
 _state_lock = threading.RLock()
 _refresh_condition = threading.Condition(_state_lock)
 _cache: dict[str, object] | None = None
+_source_cache: dict[str, object] | None = None
+_overrides: dict[str, object] = {"models": {}}
 _last_success_epoch = 0.0
 _last_error = ""
 _refreshing = False
@@ -91,18 +101,90 @@ def read_json_file(path: Path) -> dict[str, object] | None:
         return None
 
 
-def load_initial_cache() -> None:
-    global _cache, _last_success_epoch
+def write_json_file(path: Path, payload: dict[str, object]) -> None:
+    write_json_atomic(payload, path)
 
-    payload = read_json_file(CACHE_PATH) or read_json_file(SEED_PATH)
+
+def load_overrides() -> None:
+    global _overrides
+
+    payload = read_json_file(OVERRIDES_PATH)
+    if not payload:
+        _overrides = {"models": {}}
+        return
+
+    if not isinstance(payload.get("models"), dict):
+        payload["models"] = {}
+
+    _overrides = payload
+
+
+def save_overrides() -> None:
+    _overrides["updated_at_utc"] = utc_now()
+    write_json_file(OVERRIDES_PATH, _overrides)
+
+
+def models_by_slug(payload: dict[str, object] | None) -> dict[str, dict[str, object]]:
+    if not payload:
+        return {}
+
+    result: dict[str, dict[str, object]] = {}
+    for model in payload.get("models", []):
+        if not isinstance(model, dict):
+            continue
+        slug = str(model.get("slug", ""))
+        if slug:
+            result[slug] = model
+    return result
+
+
+def apply_overrides(payload: dict[str, object]) -> dict[str, object]:
+    merged = json.loads(json.dumps(payload, ensure_ascii=False))
+    override_models = _overrides.get("models", {})
+    if not isinstance(override_models, dict):
+        return merged
+
+    for model in merged.get("models", []):
+        if not isinstance(model, dict):
+            continue
+
+        slug = str(model.get("slug", ""))
+        model_override = override_models.get(slug)
+        if not isinstance(model_override, dict):
+            continue
+
+        changed_fields: list[str] = []
+        for field_name, field_value in model_override.items():
+            if field_name.startswith("_"):
+                continue
+            model[field_name] = field_value
+            changed_fields.append(field_name)
+
+        if changed_fields:
+            model["manual_override"] = True
+            model["manual_override_fields"] = sorted(changed_fields)
+            model["manual_override_updated_at_utc"] = model_override.get("_updated_at_utc", "")
+            model["manual_override_updated_by"] = model_override.get("_updated_by", "")
+
+    merged["manual_overrides_applied"] = bool(override_models)
+    return merged
+
+
+def load_initial_cache() -> None:
+    global _cache, _last_success_epoch, _source_cache
+
+    load_overrides()
+    payload = read_json_file(SOURCE_CACHE_PATH) or read_json_file(CACHE_PATH) or read_json_file(SEED_PATH)
     if not payload:
         return
 
+    effective_payload = apply_overrides(payload)
     with _state_lock:
-        _cache = payload
+        _source_cache = payload
+        _cache = effective_payload
         _last_success_epoch = time.time()
 
-    LOGGER.info("Loaded initial cache with %s models", payload.get("count"))
+    LOGGER.info("Loaded initial cache with %s models", effective_payload.get("count"))
 
 
 def cache_age_seconds() -> float | None:
@@ -172,8 +254,269 @@ def build_model_response(model: dict[str, object]) -> dict[str, object]:
     return response
 
 
+def telegram_api(method: str, payload: dict[str, object]) -> dict[str, object]:
+    if not TELEGRAM_BOT_TOKEN:
+        LOGGER.warning("Telegram bot token is not configured")
+        return {"ok": False, "description": "TELEGRAM_BOT_TOKEN is not configured"}
+
+    request = Request(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=15) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def send_telegram_message(chat_id: str, text: str) -> None:
+    if not chat_id:
+        LOGGER.warning("Telegram chat id is not configured")
+        return
+
+    try:
+        telegram_api(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": True,
+            },
+        )
+    except Exception:
+        LOGGER.exception("Could not send Telegram message")
+
+
+def send_kia_log(text: str) -> None:
+    if KIA_LOGS_CHAT_ID:
+        send_telegram_message(KIA_LOGS_CHAT_ID, text)
+    else:
+        LOGGER.warning("KIA_LOGS_CHAT_ID is not configured. Log message: %s", text)
+
+
+def format_change_message(changes: list[dict[str, str]]) -> str:
+    lines = ["Kia parser detected website changes:"]
+    for change in changes:
+        lines.extend(
+            [
+                "",
+                f"Model: {change['model_name']} ({change['slug']})",
+                f"Field: {change['field']}",
+                f"Old: {change['old_value'] or '-'}",
+                f"New: {change['new_value'] or '-'}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "To override a field manually:",
+            "/change <slug> <field> <value>",
+            "Example: /change sorento price от 17 000 000 ₸",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def detect_website_changes(
+    old_payload: dict[str, object] | None,
+    new_payload: dict[str, object],
+) -> list[dict[str, str]]:
+    old_models = models_by_slug(old_payload)
+    new_models = models_by_slug(new_payload)
+    changes: list[dict[str, str]] = []
+
+    for slug, new_model in new_models.items():
+        old_model = old_models.get(slug)
+        if not old_model:
+            continue
+
+        for field_name in WATCHED_FIELDS:
+            old_value = str(old_model.get(field_name, "") or "")
+            new_value = str(new_model.get(field_name, "") or "")
+            if old_value == new_value:
+                continue
+
+            changes.append(
+                {
+                    "slug": slug,
+                    "model_name": str(new_model.get("name", slug)),
+                    "field": field_name,
+                    "old_value": old_value,
+                    "new_value": new_value,
+                }
+            )
+
+    return changes
+
+
+def set_manual_override(model: dict[str, object], field_name: str, value: str, updated_by: str) -> dict[str, object]:
+    global _cache
+
+    slug = str(model.get("slug", ""))
+    if not slug:
+        raise ValueError("Model has no slug")
+    if field_name not in CHANGE_FIELDS:
+        raise ValueError("Unsupported field")
+
+    override_models = _overrides.setdefault("models", {})
+    if not isinstance(override_models, dict):
+        override_models = {}
+        _overrides["models"] = override_models
+
+    model_override = override_models.setdefault(slug, {})
+    if not isinstance(model_override, dict):
+        model_override = {}
+        override_models[slug] = model_override
+
+    model_override[field_name] = value
+    model_override["_updated_at_utc"] = utc_now()
+    model_override["_updated_by"] = updated_by
+
+    save_overrides()
+
+    with _state_lock:
+        if _source_cache:
+            _cache = apply_overrides(_source_cache)
+            write_json_file(CACHE_PATH, _cache)
+
+    return resolve_model_from_cache(slug) or model
+
+
+def telegram_user_name(message: dict[str, object]) -> str:
+    user = message.get("from", {})
+    if not isinstance(user, dict):
+        return "telegram"
+
+    username = str(user.get("username", "") or "")
+    if username:
+        return "@" + username
+
+    full_name = " ".join(
+        part for part in [str(user.get("first_name", "") or ""), str(user.get("last_name", "") or "")] if part
+    )
+    return full_name or str(user.get("id", "") or "telegram")
+
+
+def telegram_chat_id(message: dict[str, object]) -> str:
+    chat = message.get("chat", {})
+    if isinstance(chat, dict):
+        return str(chat.get("id", "") or "")
+    return ""
+
+
+def telegram_message_text(update: dict[str, object]) -> tuple[dict[str, object], str]:
+    message = update.get("message") or update.get("edited_message") or {}
+    if not isinstance(message, dict):
+        return {}, ""
+    return message, str(message.get("text", "") or "").strip()
+
+
+def allowed_telegram_chat(chat_id: str) -> bool:
+    return bool(KIA_LOGS_CHAT_ID and chat_id == KIA_LOGS_CHAT_ID)
+
+
+def command_help_text() -> str:
+    return "\n".join(
+        [
+            "Kia logs commands:",
+            "/chatid - show this Telegram chat id",
+            "/models - list model slugs",
+            "/get <model-or-slug> - show current model data",
+            "/change <model-or-slug> <field> <value> - set manual override",
+            "",
+            "Fields:",
+            ", ".join(sorted(CHANGE_FIELDS)),
+            "",
+            "Examples:",
+            "/change sorento price от 17 000 000 ₸",
+            "/change sorento price_list_url https://example.com/price.pdf",
+        ]
+    )
+
+
+def model_slugs_text() -> str:
+    with _state_lock:
+        models = list((_cache or {}).get("models", []))
+
+    lines = ["Kia model slugs:"]
+    for model in models:
+        if isinstance(model, dict):
+            lines.append(f"- {model.get('slug')}: {model.get('name')}")
+    return "\n".join(lines)
+
+
+def handle_change_command(args_text: str, message: dict[str, object]) -> str:
+    parts = args_text.split(maxsplit=2)
+    if len(parts) < 3:
+        return "Usage: /change <model-or-slug> <field> <value>"
+
+    model_name, field_name, value = parts
+    field_name = field_name.strip()
+    value = value.strip()
+
+    if field_name not in CHANGE_FIELDS:
+        return "Unsupported field. Allowed fields: " + ", ".join(sorted(CHANGE_FIELDS))
+
+    model = resolve_model_from_cache(model_name)
+    if not model:
+        return f"Model not found: {model_name}. Use /models to see available slugs."
+
+    updated_model = set_manual_override(model, field_name, value, telegram_user_name(message))
+    return "\n".join(
+        [
+            "Manual override saved.",
+            f"Model: {updated_model.get('name')} ({updated_model.get('slug')})",
+            f"Field: {field_name}",
+            f"Value: {value}",
+        ]
+    )
+
+
+def handle_get_command(args_text: str) -> str:
+    if not args_text:
+        return "Usage: /get <model-or-slug>"
+
+    model = resolve_model_from_cache(args_text)
+    if not model:
+        return f"Model not found: {args_text}"
+
+    return build_model_message(model)
+
+
+def handle_telegram_update(update: dict[str, object]) -> None:
+    message, text = telegram_message_text(update)
+    if not message or not text:
+        return
+
+    chat_id = telegram_chat_id(message)
+    command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+    args_text = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
+
+    if command == "/chatid":
+        send_telegram_message(chat_id, f"Chat id: {chat_id}")
+        return
+
+    if not allowed_telegram_chat(chat_id):
+        send_telegram_message(
+            chat_id,
+            "This chat is not allowed for Kia model changes. Set KIA_LOGS_CHAT_ID to this chat id to enable it.",
+        )
+        return
+
+    if command in {"/help", "/start"}:
+        send_telegram_message(chat_id, command_help_text())
+    elif command == "/models":
+        send_telegram_message(chat_id, model_slugs_text())
+    elif command == "/get":
+        send_telegram_message(chat_id, handle_get_command(args_text))
+    elif command == "/change":
+        send_telegram_message(chat_id, handle_change_command(args_text, message))
+    else:
+        send_telegram_message(chat_id, "Unknown command. Use /help.")
+
+
 def refresh_cache() -> None:
-    global _cache, _last_error, _last_success_epoch, _refreshing
+    global _cache, _source_cache, _last_error, _last_success_epoch, _refreshing
 
     with _refresh_condition:
         if _refreshing:
@@ -184,16 +527,28 @@ def refresh_cache() -> None:
 
     try:
         LOGGER.info("Refreshing Kia models cache")
-        payload = scrape_once(CACHE_PATH, SCRAPE_TIMEOUT_SECONDS)
-        payload["served_by"] = "render-web-service"
-        payload["refreshed_at_utc"] = utc_now()
+        with _state_lock:
+            previous_source_cache = _source_cache
+
+        source_payload = scrape_once(CACHE_PATH, SCRAPE_TIMEOUT_SECONDS)
+        source_payload["served_by"] = "render-web-service"
+        source_payload["refreshed_at_utc"] = utc_now()
+        changes = detect_website_changes(previous_source_cache, source_payload)
+        write_json_file(SOURCE_CACHE_PATH, source_payload)
+
+        effective_payload = apply_overrides(source_payload)
+        write_json_file(CACHE_PATH, effective_payload)
 
         with _state_lock:
-            _cache = payload
+            _source_cache = source_payload
+            _cache = effective_payload
             _last_success_epoch = time.time()
             _last_error = ""
 
-        LOGGER.info("Refreshed Kia models cache with %s models", payload.get("count"))
+        if changes:
+            send_kia_log(format_change_message(changes))
+
+        LOGGER.info("Refreshed Kia models cache with %s models", effective_payload.get("count"))
     except Exception as exc:
         LOGGER.exception("Kia models refresh failed")
         with _state_lock:
@@ -227,6 +582,7 @@ def status_payload() -> dict[str, object]:
     with _state_lock:
         count = _cache.get("count") if _cache else 0
         fetched_at = _cache.get("fetched_at_utc") if _cache else ""
+        override_models = _overrides.get("models", {})
         return {
             "ok": bool(_cache) and not _last_error,
             "has_cache": bool(_cache),
@@ -236,6 +592,8 @@ def status_payload() -> dict[str, object]:
             "refresh_interval_seconds": REFRESH_INTERVAL_SECONDS,
             "refreshing": _refreshing,
             "last_error": _last_error,
+            "telegram_configured": bool(TELEGRAM_BOT_TOKEN and KIA_LOGS_CHAT_ID),
+            "manual_override_count": len(override_models) if isinstance(override_models, dict) else 0,
         }
 
 
@@ -324,6 +682,18 @@ class KiaModelsHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed_url = urlparse(self.path)
         route = parsed_url.path.rstrip("/") or "/"
+
+        if route == "/telegram/webhook" or route.startswith("/telegram/webhook/"):
+            if TELEGRAM_WEBHOOK_SECRET:
+                received_secret = route.removeprefix("/telegram/webhook/") if route.startswith("/telegram/webhook/") else ""
+                if received_secret != TELEGRAM_WEBHOOK_SECRET:
+                    self.write_json({"ok": False, "error": "Forbidden"}, status=HTTPStatus.FORBIDDEN)
+                    return
+
+            update = self.read_json_body()
+            handle_telegram_update(update)
+            self.write_json({"ok": True})
+            return
 
         if route in {"/model", "/api/model"}:
             body = self.read_json_body()

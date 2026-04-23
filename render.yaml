@@ -10,3 +10,15 @@ services:
         value: "3600"
       - key: SCRAPE_TIMEOUT_SECONDS
         value: "30"
+      - key: KIA_MODELS_OUTPUT
+        value: "/tmp/kia_models.json"
+      - key: KIA_MODELS_SOURCE_OUTPUT
+        value: "/tmp/kia_models_source.json"
+      - key: KIA_MODEL_OVERRIDES_PATH
+        value: "/tmp/kia_model_overrides.json"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: KIA_LOGS_CHAT_ID
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
