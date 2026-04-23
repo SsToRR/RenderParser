@@ -35,6 +35,47 @@ _last_success_epoch = 0.0
 _last_error = ""
 _refreshing = False
 
+MODEL_ALIASES = {
+    "kia sportage": "sportage",
+    "sportage": "sportage",
+    "new kia sportage": "new_sportage",
+    "new sportage": "new_sportage",
+    "новый sportage": "new_sportage",
+    "новый kia sportage": "new_sportage",
+    "kia ceed": "ceed",
+    "ceed": "ceed",
+    "kia ceed sw": "ceed_sw",
+    "ceed sw": "ceed_sw",
+    "kia cerato": "cerato",
+    "cerato": "cerato",
+    "kia k5": "newk5",
+    "k5": "newk5",
+    "kia k8": "k8",
+    "k8": "k8",
+    "new kia k8": "k8",
+    "new k8": "k8",
+    "новый kia k8": "k8",
+    "новый k8": "k8",
+    "kia k9": "k9",
+    "k9": "k9",
+    "kia ev9": "ev9",
+    "ev9": "ev9",
+    "kia sorento": "sorento",
+    "sorento": "sorento",
+    "kia soul": "soul",
+    "soul": "soul",
+    "kia carnival": "carnivalnew",
+    "carnival": "carnivalnew",
+    "kia seltos": "seltos",
+    "seltos": "seltos",
+    "kia soluto": "soluto",
+    "soluto": "soluto",
+    "new kia soluto": "soluto",
+    "new soluto": "soluto",
+    "новый kia soluto": "soluto",
+    "новый soluto": "soluto",
+}
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -74,6 +115,61 @@ def cache_age_seconds() -> float | None:
 def is_cache_stale() -> bool:
     age = cache_age_seconds()
     return age is None or age >= REFRESH_INTERVAL_SECONDS
+
+
+def normalize_query(value: str) -> str:
+    return " ".join(value.strip().lower().split())
+
+
+def resolve_model_from_cache(raw_name: str) -> dict[str, object] | None:
+    normalized = normalize_query(raw_name)
+    target_slug = MODEL_ALIASES.get(normalized, normalized.replace(" ", "_"))
+
+    with _state_lock:
+        models = list((_cache or {}).get("models", []))
+
+    for model in models:
+        slug = str(model.get("slug", "")).lower()
+        name = normalize_query(str(model.get("name", "")))
+        if slug == target_slug or name == normalized:
+            return model
+
+    for model in models:
+        slug = str(model.get("slug", "")).lower()
+        name = normalize_query(str(model.get("name", "")))
+        if normalized and (normalized in name or normalized in slug):
+            return model
+
+    return None
+
+
+def build_model_message(model: dict[str, object]) -> str:
+    lines = [
+        f"Kia {model.get('name', '')}".strip(),
+        f"Цена: {model.get('price') or 'пока недоступна'}",
+        f"Прайс-лист: {model.get('price_list_url') or 'пока недоступен'}",
+        f"Брошюра: {model.get('brochure_url') or 'пока недоступна'}",
+        f"Ссылка на модель: {model.get('model_url') or 'пока недоступна'}",
+    ]
+    return "\n".join(lines)
+
+
+def build_model_response(model: dict[str, object]) -> dict[str, object]:
+    response = {
+        "status": "success",
+        "name": model.get("name", ""),
+        "slug": model.get("slug", ""),
+        "price": model.get("price", ""),
+        "previous_price": model.get("previous_price", ""),
+        "model_url": model.get("model_url", ""),
+        "options_url": model.get("options_url", ""),
+        "price_list_url": model.get("price_list_url", ""),
+        "brochure_url": model.get("brochure_url", ""),
+        "errors": model.get("errors", []),
+        "message": build_model_message(model),
+        "model": model,
+    }
+    return response
 
 
 def refresh_cache() -> None:
@@ -149,7 +245,7 @@ class KiaModelsHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_cors_headers()
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
@@ -186,6 +282,31 @@ class KiaModelsHandler(BaseHTTPRequestHandler):
                 )
             return
 
+        if route in {"/model", "/api/model"}:
+            model_name = query.get("name", [""])[0]
+            if query.get("refresh") == ["1"]:
+                refresh_cache()
+            else:
+                trigger_refresh_if_needed()
+
+            if not model_name:
+                self.write_json({"error": "Missing required query parameter: name"}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            model = resolve_model_from_cache(model_name)
+            if model:
+                self.write_json(build_model_response(model))
+            else:
+                self.write_json(
+                    {
+                        "status": "error",
+                        "error": "Model not found",
+                        "model_name_normalized": normalize_query(model_name),
+                    },
+                    status=HTTPStatus.NOT_FOUND,
+                )
+            return
+
         if route == "/refresh":
             wait_for_refresh = query.get("wait") == ["1"]
             if wait_for_refresh:
@@ -199,6 +320,53 @@ class KiaModelsHandler(BaseHTTPRequestHandler):
             return
 
         self.write_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+
+    def do_POST(self) -> None:
+        parsed_url = urlparse(self.path)
+        route = parsed_url.path.rstrip("/") or "/"
+
+        if route in {"/model", "/api/model"}:
+            body = self.read_json_body()
+            model_name = str(body.get("model_name") or body.get("name") or "")
+            refresh = bool(body.get("refresh"))
+
+            if refresh:
+                refresh_cache()
+            else:
+                trigger_refresh_if_needed()
+
+            if not model_name:
+                self.write_json({"error": "Missing required JSON field: model_name"}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            model = resolve_model_from_cache(model_name)
+            if model:
+                self.write_json(build_model_response(model))
+            else:
+                self.write_json(
+                    {
+                        "status": "error",
+                        "error": "Model not found",
+                        "model_name_normalized": normalize_query(model_name),
+                    },
+                    status=HTTPStatus.NOT_FOUND,
+                )
+            return
+
+        self.write_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+
+    def read_json_body(self) -> dict[str, object]:
+        content_length = int(self.headers.get("Content-Length", "0") or "0")
+        if content_length <= 0:
+            return {}
+
+        try:
+            raw_body = self.rfile.read(content_length)
+            body = json.loads(raw_body.decode("utf-8"))
+            return body if isinstance(body, dict) else {}
+        except Exception:
+            LOGGER.exception("Could not parse JSON request body")
+            return {}
 
     def log_message(self, format: str, *args: object) -> None:
         LOGGER.info("%s - %s", self.address_string(), format % args)
