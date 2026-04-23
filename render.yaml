@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: kia-models-parser
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: REFRESH_INTERVAL_SECONDS
+        value: "3600"
+      - key: SCRAPE_TIMEOUT_SECONDS
+        value: "30"

@@ -1,4 +1,5 @@
-__pycache
+__pycache__/
+*.py[cod]
 test_kia_models_parser.py
 template_nextbot.py
 System Prompt.txt
