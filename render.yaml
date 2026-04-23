@@ -16,6 +16,8 @@ services:
         value: "/tmp/kia_models_source.json"
       - key: KIA_MODEL_OVERRIDES_PATH
         value: "/tmp/kia_model_overrides.json"
+      - key: KIA_PENDING_CHANGES_PATH
+        value: "/tmp/kia_pending_changes.json"
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: KIA_LOGS_CHAT_ID

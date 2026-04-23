@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 import threading
 import time
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ CACHE_PATH = Path(os.getenv("KIA_MODELS_OUTPUT", str(DEFAULT_CACHE_PATH)))
 SOURCE_CACHE_PATH = Path(os.getenv("KIA_MODELS_SOURCE_OUTPUT", str(CACHE_PATH.with_name("kia_models_source.json"))))
 SEED_PATH = Path(os.getenv("KIA_MODELS_SEED_PATH", str(DEFAULT_OUTPUT_PATH)))
 OVERRIDES_PATH = Path(os.getenv("KIA_MODEL_OVERRIDES_PATH", str(CACHE_PATH.with_name("kia_model_overrides.json"))))
+PENDING_CHANGES_PATH = Path(os.getenv("KIA_PENDING_CHANGES_PATH", str(CACHE_PATH.with_name("kia_pending_changes.json"))))
 REFRESH_INTERVAL_SECONDS = int(os.getenv("REFRESH_INTERVAL_SECONDS", str(DEFAULT_REFRESH_INTERVAL_SECONDS)))
 SCRAPE_TIMEOUT_SECONDS = int(os.getenv("SCRAPE_TIMEOUT_SECONDS", str(DEFAULT_SCRAPE_TIMEOUT_SECONDS)))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -43,6 +45,7 @@ _refresh_condition = threading.Condition(_state_lock)
 _cache: dict[str, object] | None = None
 _source_cache: dict[str, object] | None = None
 _overrides: dict[str, object] = {"models": {}}
+_pending_changes: dict[str, dict[str, object]] = {}
 _pending_edits: dict[str, dict[str, object]] = {}
 _last_success_epoch = 0.0
 _last_error = ""
@@ -122,9 +125,31 @@ def load_overrides() -> None:
     _overrides = payload
 
 
+def load_pending_changes() -> None:
+    global _pending_changes
+
+    payload = read_json_file(PENDING_CHANGES_PATH)
+    if not payload:
+        _pending_changes = {}
+        return
+
+    changes = payload.get("changes", {})
+    _pending_changes = changes if isinstance(changes, dict) else {}
+
+
 def save_overrides() -> None:
     _overrides["updated_at_utc"] = utc_now()
     write_json_file(OVERRIDES_PATH, _overrides)
+
+
+def save_pending_changes() -> None:
+    write_json_file(
+        PENDING_CHANGES_PATH,
+        {
+            "updated_at_utc": utc_now(),
+            "changes": _pending_changes,
+        },
+    )
 
 
 def models_by_slug(payload: dict[str, object] | None) -> dict[str, dict[str, object]]:
@@ -177,6 +202,7 @@ def load_initial_cache() -> None:
     global _cache, _last_success_epoch, _source_cache
 
     load_overrides()
+    load_pending_changes()
     payload = read_json_file(SOURCE_CACHE_PATH) or read_json_file(CACHE_PATH) or read_json_file(SEED_PATH)
     if not payload:
         return
@@ -337,6 +363,49 @@ def send_kia_log(text: str) -> None:
         LOGGER.warning("KIA_LOGS_CHAT_ID is not configured. Log message: %s", text)
 
 
+def website_change_keyboard(change_id_value: str, slug: str) -> dict[str, object]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Accept new value", "callback_data": f"change:accept:{change_id_value}"},
+                {"text": "Decline / keep old", "callback_data": f"change:decline:{change_id_value}"},
+            ],
+            [{"text": "Show model", "callback_data": f"model:{slug}:0"}],
+        ]
+    }
+
+
+def format_single_change_message(change: dict[str, str]) -> str:
+    return "\n".join(
+        [
+            "Kia website change detected.",
+            "",
+            f"Model: {change['model_name']} ({change['slug']})",
+            f"Field: {change['field']}",
+            f"Old value: {change.get('old_value') or '-'}",
+            f"New website value: {change.get('new_value') or '-'}",
+            "",
+            "Choose what to do:",
+            "- Accept: use the new website value.",
+            "- Decline: keep the old value as a manual override.",
+        ]
+    )
+
+
+def send_kia_change_logs(changes: list[dict[str, str]]) -> None:
+    if not KIA_LOGS_CHAT_ID:
+        LOGGER.warning("KIA_LOGS_CHAT_ID is not configured. Changes: %s", changes)
+        return
+
+    for change in changes:
+        pending_id = queue_pending_change(change)
+        send_telegram_message(
+            KIA_LOGS_CHAT_ID,
+            format_single_change_message(change),
+            website_change_keyboard(pending_id, change["slug"]),
+        )
+
+
 def format_change_message(changes: list[dict[str, str]]) -> str:
     lines = ["Kia parser detected website changes:"]
     for change in changes:
@@ -392,15 +461,7 @@ def detect_website_changes(
     return changes
 
 
-def set_manual_override(model: dict[str, object], field_name: str, value: str, updated_by: str) -> dict[str, object]:
-    global _cache
-
-    slug = str(model.get("slug", ""))
-    if not slug:
-        raise ValueError("Model has no slug")
-    if field_name not in CHANGE_FIELDS:
-        raise ValueError("Unsupported field")
-
+def ensure_model_override(slug: str) -> dict[str, object]:
     override_models = _overrides.setdefault("models", {})
     if not isinstance(override_models, dict):
         override_models = {}
@@ -411,18 +472,100 @@ def set_manual_override(model: dict[str, object], field_name: str, value: str, u
         model_override = {}
         override_models[slug] = model_override
 
-    model_override[field_name] = value
-    model_override["_updated_at_utc"] = utc_now()
-    model_override["_updated_by"] = updated_by
+    return model_override
 
-    save_overrides()
+
+def refresh_effective_cache_from_source() -> None:
+    global _cache
 
     with _state_lock:
         if _source_cache:
             _cache = apply_overrides(_source_cache)
             write_json_file(CACHE_PATH, _cache)
 
+
+def set_manual_override(model: dict[str, object], field_name: str, value: str, updated_by: str) -> dict[str, object]:
+    slug = str(model.get("slug", ""))
+    if not slug:
+        raise ValueError("Model has no slug")
+    if field_name not in CHANGE_FIELDS:
+        raise ValueError("Unsupported field")
+
+    model_override = ensure_model_override(slug)
+
+    model_override[field_name] = value
+    model_override["_updated_at_utc"] = utc_now()
+    model_override["_updated_by"] = updated_by
+
+    save_overrides()
+    refresh_effective_cache_from_source()
+
     return resolve_model_from_cache(slug) or model
+
+
+def set_manual_override_by_slug(slug: str, field_name: str, value: str, updated_by: str) -> None:
+    if field_name not in CHANGE_FIELDS:
+        raise ValueError("Unsupported field")
+
+    model_override = ensure_model_override(slug)
+    model_override[field_name] = value
+    model_override["_updated_at_utc"] = utc_now()
+    model_override["_updated_by"] = updated_by
+    save_overrides()
+    refresh_effective_cache_from_source()
+
+
+def remove_manual_override(slug: str, field_name: str) -> None:
+    override_models = _overrides.get("models", {})
+    if not isinstance(override_models, dict):
+        return
+
+    model_override = override_models.get(slug)
+    if not isinstance(model_override, dict):
+        return
+
+    model_override.pop(field_name, None)
+    remaining_fields = [key for key in model_override if not key.startswith("_")]
+    if remaining_fields:
+        model_override["_updated_at_utc"] = utc_now()
+        model_override["_updated_by"] = "telegram-accept"
+    else:
+        override_models.pop(slug, None)
+
+    save_overrides()
+    refresh_effective_cache_from_source()
+
+
+def change_id(change: dict[str, str]) -> str:
+    raw = "|".join(
+        [
+            change.get("slug", ""),
+            change.get("field", ""),
+            change.get("old_value", ""),
+            change.get("new_value", ""),
+        ]
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def queue_pending_change(change: dict[str, str]) -> str:
+    queued_change = dict(change)
+    queued_change["id"] = change_id(change)
+    queued_change["status"] = "pending"
+    queued_change["created_at_utc"] = utc_now()
+    _pending_changes[queued_change["id"]] = queued_change
+    save_pending_changes()
+    return queued_change["id"]
+
+
+def freeze_changes_until_approval(changes: list[dict[str, str]]) -> None:
+    for change in changes:
+        set_manual_override_by_slug(
+            change["slug"],
+            change["field"],
+            change.get("old_value", ""),
+            "pending-website-change",
+        )
 
 
 def telegram_user_name(message: dict[str, object]) -> str:
@@ -735,6 +878,74 @@ def callback_user_name(callback: dict[str, object]) -> str:
     return str(user.get("first_name", "") or "there")
 
 
+def format_change_decision_message(change: dict[str, object], action: str, actor: str) -> str:
+    status_text = "Accepted new website value" if action == "accept" else "Declined; kept old value"
+    value_line = (
+        f"Active value: {change.get('new_value') or '-'}"
+        if action == "accept"
+        else f"Active value: {change.get('old_value') or '-'}"
+    )
+    return "\n".join(
+        [
+            f"{status_text}.",
+            "",
+            f"Model: {change.get('model_name')} ({change.get('slug')})",
+            f"Field: {change.get('field')}",
+            f"Old value: {change.get('old_value') or '-'}",
+            f"New website value: {change.get('new_value') or '-'}",
+            value_line,
+            f"Changed by: {actor}",
+        ]
+    )
+
+
+def handle_website_change_decision(
+    action: str,
+    change_id_value: str,
+    callback: dict[str, object],
+    chat_id: str,
+    message_id: str,
+    callback_id: str,
+) -> None:
+    change = _pending_changes.get(change_id_value)
+    if not change:
+        answer_callback_query(callback_id, "This change is no longer pending.")
+        edit_telegram_message(chat_id, message_id, "This website change is no longer pending.")
+        return
+
+    if change.get("status") != "pending":
+        answer_callback_query(callback_id, f"Already {change.get('status')}.")
+        edit_telegram_message(
+            chat_id,
+            message_id,
+            format_change_decision_message(change, str(change.get("status")), str(change.get("decided_by", ""))),
+        )
+        return
+
+    slug = str(change.get("slug", ""))
+    field_name = str(change.get("field", ""))
+    actor = callback_user_name(callback)
+
+    if action == "accept":
+        remove_manual_override(slug, field_name)
+        change["status"] = "accept"
+        callback_notice = "Accepted new website value."
+    elif action == "decline":
+        set_manual_override_by_slug(slug, field_name, str(change.get("old_value", "") or ""), actor)
+        change["status"] = "decline"
+        callback_notice = "Declined. Old value kept."
+    else:
+        answer_callback_query(callback_id, "Unknown action.")
+        return
+
+    change["decided_at_utc"] = utc_now()
+    change["decided_by"] = actor
+    save_pending_changes()
+
+    edit_telegram_message(chat_id, message_id, format_change_decision_message(change, action, actor))
+    answer_callback_query(callback_id, callback_notice)
+
+
 def handle_telegram_callback(callback: dict[str, object]) -> None:
     callback_id = str(callback.get("id", "") or "")
     data = str(callback.get("data", "") or "")
@@ -748,6 +959,14 @@ def handle_telegram_callback(callback: dict[str, object]) -> None:
 
     if not allowed_telegram_chat(chat_id):
         answer_callback_query(callback_id, "This chat is not allowed.")
+        return
+
+    if data.startswith("change:"):
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            answer_callback_query(callback_id, "Invalid change button.")
+            return
+        handle_website_change_decision(parts[1], parts[2], callback, chat_id, message_id, callback_id)
         return
 
     if data.startswith("models:"):
@@ -864,6 +1083,8 @@ def refresh_cache() -> None:
         source_payload["refreshed_at_utc"] = utc_now()
         changes = detect_website_changes(previous_source_cache, source_payload)
         write_json_file(SOURCE_CACHE_PATH, source_payload)
+        if changes:
+            freeze_changes_until_approval(changes)
 
         effective_payload = apply_overrides(source_payload)
         write_json_file(CACHE_PATH, effective_payload)
@@ -875,7 +1096,7 @@ def refresh_cache() -> None:
             _last_error = ""
 
         if changes:
-            send_kia_log(format_change_message(changes))
+            send_kia_change_logs(changes)
 
         LOGGER.info("Refreshed Kia models cache with %s models", effective_payload.get("count"))
     except Exception as exc:
