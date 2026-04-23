@@ -1,0 +1,172 @@
+{
+  "source_url": "https://kia.com.kz/models",
+  "fetched_at_utc": "2026-04-23T11:02:57.206800+00:00",
+  "count": 15,
+  "models": [
+    {
+      "name": "Новый Soluto",
+      "slug": "soluto",
+      "price": "от 6 990 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/soluto/",
+      "options_url": "https://kia.com.kz/models/soluto/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/tmhwQ07tnp1ss1CUX46YJpptgJMuCK6xNFFtHDJC.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/Cpttg1BFtTILvnc8wkuOyvkWyTGXF67XPavfradA.pdf",
+      "errors": []
+    },
+    {
+      "name": "Новый K8",
+      "slug": "k8",
+      "price": "от 22 990 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/k8/",
+      "options_url": "https://kia.com.kz/models/k8/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/1Bw8dNT9oSjzd8ez7gEBqRGQYWIgkrit28ejjLzw.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/W7ZTRRLqUBIpg7kRZPcbmfPrquKtCIhWKRGwde3b.pdf",
+      "errors": []
+    },
+    {
+      "name": "Новый Sportage",
+      "slug": "new_sportage",
+      "price": "от 11 790 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/new_sportage/",
+      "options_url": "https://kia.com.kz/models/new_sportage/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/0zZ8VohqjsyxYxZM2A870gnx4hlfyg1iJwYADbc9.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/gM1fO9yPEt4zQuh8BuBLA2lpd5wIoIhC0NyeNJ7g.pdf",
+      "errors": []
+    },
+    {
+      "name": "Ceed",
+      "slug": "ceed",
+      "price": "от 9 690 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/ceed/",
+      "options_url": "https://kia.com.kz/models/ceed/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/vX0zSEowx6W7BPBIR8EbaYaimktSbElGKRQbpZIy.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/oE0HmvoLpqb54I0JmeSnBCuJgY32Ne3Ds2cZSIdf.pdf",
+      "errors": []
+    },
+    {
+      "name": "Ceed SW",
+      "slug": "ceed_sw",
+      "price": "от 10 990 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/ceed_sw/",
+      "options_url": "https://kia.com.kz/models/ceed_sw/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/AMatk62keyciIbG5sfcZ5CGRoMZvWdExUS7dfCwo.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/WG0s7m84uNqZkhKxLmAUZCXFRzJ72f4JGzxLTY3E.pdf",
+      "errors": []
+    },
+    {
+      "name": "Cerato",
+      "slug": "cerato",
+      "price": "от 9 990 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/cerato/",
+      "options_url": "https://kia.com.kz/models/cerato/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/rMHXdQgAklNbDZdd9znjrjUPkwU8JrKmdFEchTNT.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/iGQQN5k01XKeAIvZJniiCwzJLjSY01aGEi81hJP0.pdf",
+      "errors": []
+    },
+    {
+      "name": "K5",
+      "slug": "newk5",
+      "price": "от 10 990 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/newk5/",
+      "options_url": "https://kia.com.kz/models/newk5/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/hv0BooPwkMd7ZYmudF1lWDP71QydLR4ZQaUaBW22.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/YBkmjBNPIldUSxD4CTN1icltAdbYTe53qcVhGgEy.pdf",
+      "errors": []
+    },
+    {
+      "name": "K8",
+      "slug": "k8old",
+      "price": "от 19 390 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/k8old/",
+      "options_url": "https://kia.com.kz/models/k8old/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/Nb25pIASDc1vPdLciYlKmBxyN5yfNByB4iNTb7Ne.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/aQQVURo6vFYnYZESeNw1x166phW48DxVK8Yb1PmD.pdf",
+      "errors": []
+    },
+    {
+      "name": "K9",
+      "slug": "k9",
+      "price": "от 40 990 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/k9/",
+      "options_url": "https://kia.com.kz/models/k9/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/sXnka6JjU53CUf95H5HTC5XWl3mqmlPMrOoJDK50.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/W4xTMN4lIfhYasqTlULM4buVHTHU7wkaCSdXwkY5.pdf",
+      "errors": []
+    },
+    {
+      "name": "Soul",
+      "slug": "soul",
+      "price": "от 9 990 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/soul/",
+      "options_url": "https://kia.com.kz/models/soul/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/GYu5X6JrxPquUBeevzX1ehyROLqhs1DZwvAU7u66.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/TfZZJtKqY2iwM084TuSgZvyFV5C2DsvrV7ZiFInw.pdf",
+      "errors": []
+    },
+    {
+      "name": "Seltos",
+      "slug": "seltos",
+      "price": "от 10 990 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/seltos/",
+      "options_url": "https://kia.com.kz/models/seltos/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/Hf500i8hK4Sa31DPHaEYgSTmHfPjjNkPyXB3XuJG.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/XoUNvPaFicJJLZ7CfwdxNCKxOP0ymOiwhwz2aE0A.pdf",
+      "errors": []
+    },
+    {
+      "name": "Sportage",
+      "slug": "sportage",
+      "price": "от 11 990 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/sportage/",
+      "options_url": "https://kia.com.kz/models/sportage/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/nolUZuHmU81C2xkRxS6nGAlZZ9qPZavQTKRCvmCH.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/cOvDHY8i3sBMo9YzTusQC6Lhm8XQoTJVQvKocCwZ.pdf",
+      "errors": []
+    },
+    {
+      "name": "Sorento",
+      "slug": "sorento",
+      "price": "от 16 990 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/sorento/",
+      "options_url": "https://kia.com.kz/models/sorento/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/KJJYLU5Jh2xFlgWAkqGd8ph109ttcwvOQz2UVP1r.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/Uv6ZFfoRBfDj7J0wac6lerPR2O1pEEAwJ250Pbip.pdf",
+      "errors": []
+    },
+    {
+      "name": "Carnival",
+      "slug": "carnivalnew",
+      "price": "от 21 990 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/carnivalnew/",
+      "options_url": "https://kia.com.kz/models/carnivalnew/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/5wdITICm1JnpoOcYSVOQL6gyIUqCG02sHlb0J64o.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/sPNIcozCALlvgWoFNRVEBK20svBrlVTwa546I4GO.pdf",
+      "errors": []
+    },
+    {
+      "name": "EV9",
+      "slug": "ev9",
+      "price": "от 35 990 000 ₸",
+      "previous_price": "",
+      "model_url": "https://kia.com.kz/models/ev9/",
+      "options_url": "https://kia.com.kz/models/ev9/options/",
+      "price_list_url": "https://api.kia.com.kz/images/cars/1SdhcNi946lVgls9AUFmiDJK5HuCJ37hTKZQA4yJ.pdf",
+      "brochure_url": "https://api.kia.com.kz/images/cars/LKOpPGuOGmjknDPPTGVygeYuOUoxrKBkiq4szSv7.pdf",
+      "errors": []
+    }
+  ]
+}
