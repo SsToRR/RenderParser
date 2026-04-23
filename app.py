@@ -35,12 +35,15 @@ KIA_LOGS_CHAT_ID = os.getenv("KIA_LOGS_CHAT_ID", "")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 CHANGE_FIELDS = {"price", "price_list_url", "brochure_url", "model_url", "options_url"}
 WATCHED_FIELDS = ("price", "price_list_url", "brochure_url")
+BUTTON_EDIT_FIELDS = ("price", "price_list_url", "brochure_url")
+MODELS_PER_PAGE = 4
 
 _state_lock = threading.RLock()
 _refresh_condition = threading.Condition(_state_lock)
 _cache: dict[str, object] | None = None
 _source_cache: dict[str, object] | None = None
 _overrides: dict[str, object] = {"models": {}}
+_pending_edits: dict[str, dict[str, object]] = {}
 _last_success_epoch = 0.0
 _last_error = ""
 _refreshing = False
@@ -269,22 +272,62 @@ def telegram_api(method: str, payload: dict[str, object]) -> dict[str, object]:
         return json.loads(response.read().decode("utf-8"))
 
 
-def send_telegram_message(chat_id: str, text: str) -> None:
+def send_telegram_message(
+    chat_id: str,
+    text: str,
+    reply_markup: dict[str, object] | None = None,
+) -> None:
     if not chat_id:
         LOGGER.warning("Telegram chat id is not configured")
         return
 
+    payload: dict[str, object] = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
     try:
-        telegram_api(
-            "sendMessage",
-            {
-                "chat_id": chat_id,
-                "text": text,
-                "disable_web_page_preview": True,
-            },
-        )
+        telegram_api("sendMessage", payload)
     except Exception:
         LOGGER.exception("Could not send Telegram message")
+
+
+def edit_telegram_message(
+    chat_id: str,
+    message_id: str,
+    text: str,
+    reply_markup: dict[str, object] | None = None,
+) -> None:
+    payload: dict[str, object] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
+    try:
+        telegram_api("editMessageText", payload)
+    except Exception:
+        LOGGER.exception("Could not edit Telegram message")
+
+
+def answer_callback_query(callback_query_id: str, text: str = "") -> None:
+    if not callback_query_id:
+        return
+
+    payload: dict[str, object] = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+
+    try:
+        telegram_api("answerCallbackQuery", payload)
+    except Exception:
+        LOGGER.exception("Could not answer Telegram callback query")
 
 
 def send_kia_log(text: str) -> None:
@@ -404,6 +447,13 @@ def telegram_chat_id(message: dict[str, object]) -> str:
     return ""
 
 
+def telegram_user_id(message: dict[str, object]) -> str:
+    user = message.get("from", {})
+    if isinstance(user, dict):
+        return str(user.get("id", "") or "")
+    return ""
+
+
 def telegram_message_text(update: dict[str, object]) -> tuple[dict[str, object], str]:
     message = update.get("message") or update.get("edited_message") or {}
     if not isinstance(message, dict):
@@ -420,12 +470,13 @@ def command_help_text() -> str:
         [
             "Kia logs commands:",
             "/chatid - show this Telegram chat id",
-            "/models - list model slugs",
+            "/models - open model buttons",
             "/get <model-or-slug> - show current model data",
             "/change <model-or-slug> <field> <value> - set manual override",
+            "/cancel - cancel pending button edit",
             "",
             "Fields:",
-            ", ".join(sorted(CHANGE_FIELDS)),
+            ", ".join(BUTTON_EDIT_FIELDS),
             "",
             "Examples:",
             "/change sorento price от 17 000 000 ₸",
@@ -443,6 +494,129 @@ def model_slugs_text() -> str:
         if isinstance(model, dict):
             lines.append(f"- {model.get('slug')}: {model.get('name')}")
     return "\n".join(lines)
+
+
+def get_cached_models() -> list[dict[str, object]]:
+    with _state_lock:
+        models = list((_cache or {}).get("models", []))
+    return [model for model in models if isinstance(model, dict)]
+
+
+def clamp_page(page: int, total_pages: int) -> int:
+    if total_pages <= 0:
+        return 0
+    return min(max(page, 0), total_pages - 1)
+
+
+def models_page_text(page: int, total_pages: int) -> str:
+    return "\n".join(
+        [
+            "Choose a Kia model to edit.",
+            f"Page {page + 1} of {max(total_pages, 1)}",
+        ]
+    )
+
+
+def models_page_keyboard(page: int) -> tuple[str, dict[str, object]]:
+    models = get_cached_models()
+    total_pages = max(1, (len(models) + MODELS_PER_PAGE - 1) // MODELS_PER_PAGE)
+    page = clamp_page(page, total_pages)
+    start = page * MODELS_PER_PAGE
+    page_models = models[start : start + MODELS_PER_PAGE]
+
+    keyboard: list[list[dict[str, str]]] = []
+    for model in page_models:
+        name = str(model.get("name", model.get("slug", "")))
+        slug = str(model.get("slug", ""))
+        keyboard.append([{"text": name, "callback_data": f"model:{slug}:{page}"}])
+
+    keyboard.append(
+        [
+            {
+                "text": "Previous",
+                "callback_data": f"models:{page - 1}" if page > 0 else "noop",
+            },
+            {
+                "text": "Next",
+                "callback_data": f"models:{page + 1}" if page + 1 < total_pages else "noop",
+            },
+        ]
+    )
+    return models_page_text(page, total_pages), {"inline_keyboard": keyboard}
+
+
+def field_label(field_name: str) -> str:
+    labels = {
+        "price": "Price",
+        "price_list_url": "Price-list PDF",
+        "brochure_url": "Brochure PDF",
+    }
+    return labels.get(field_name, field_name)
+
+
+def field_prompt(field_name: str) -> str:
+    if field_name == "price":
+        return "Reply with the new price, for example: от 17 000 000 ₸"
+    return "Reply with the new PDF link."
+
+
+def model_fields_keyboard(slug: str, page: int = 0) -> dict[str, object]:
+    keyboard = [
+        [{"text": field_label(field_name), "callback_data": f"field:{slug}:{field_name}"}]
+        for field_name in BUTTON_EDIT_FIELDS
+    ]
+    keyboard.append([{"text": "Back to models", "callback_data": f"models:{page}"}])
+    return {"inline_keyboard": keyboard}
+
+
+def pending_key(chat_id: str, user_id: str) -> str:
+    return f"{chat_id}:{user_id}"
+
+
+def set_pending_edit(chat_id: str, user_id: str, slug: str, field_name: str) -> None:
+    _pending_edits[pending_key(chat_id, user_id)] = {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "slug": slug,
+        "field": field_name,
+        "created_at": time.time(),
+    }
+
+
+def pop_pending_edit(chat_id: str, user_id: str) -> dict[str, object] | None:
+    return _pending_edits.pop(pending_key(chat_id, user_id), None)
+
+
+def get_pending_edit(chat_id: str, user_id: str) -> dict[str, object] | None:
+    return _pending_edits.get(pending_key(chat_id, user_id))
+
+
+def send_models_page(chat_id: str, page: int = 0) -> None:
+    text, keyboard = models_page_keyboard(page)
+    send_telegram_message(chat_id, text, keyboard)
+
+
+def edit_models_page(chat_id: str, message_id: str, page: int = 0) -> None:
+    text, keyboard = models_page_keyboard(page)
+    edit_telegram_message(chat_id, message_id, text, keyboard)
+
+
+def edit_model_field_selector(chat_id: str, message_id: str, slug: str, page: int = 0) -> None:
+    model = resolve_model_from_cache(slug)
+    if not model:
+        edit_telegram_message(chat_id, message_id, f"Model not found: {slug}")
+        return
+
+    text = "\n".join(
+        [
+            f"Model: {model.get('name')} ({model.get('slug')})",
+            "",
+            build_model_message(model),
+            "",
+            "What do you want to change?",
+        ]
+    )
+    edit_telegram_message(chat_id, message_id, text, model_fields_keyboard(slug, page))
 
 
 def handle_change_command(args_text: str, message: dict[str, object]) -> str:
@@ -483,12 +657,165 @@ def handle_get_command(args_text: str) -> str:
     return build_model_message(model)
 
 
+def handle_pending_edit_message(message: dict[str, object], text: str) -> bool:
+    chat_id = telegram_chat_id(message)
+    user_id = telegram_user_id(message)
+    if not chat_id or not user_id:
+        return False
+
+    pending = get_pending_edit(chat_id, user_id)
+    if not pending:
+        return False
+
+    if text.lower() == "/cancel":
+        pop_pending_edit(chat_id, user_id)
+        send_telegram_message(chat_id, "Canceled the pending Kia model edit.")
+        return True
+
+    value = text.strip()
+    if not value:
+        send_telegram_message(chat_id, "Value is empty. Reply again or send /cancel.")
+        return True
+
+    slug = str(pending.get("slug", ""))
+    field_name = str(pending.get("field", ""))
+    model = resolve_model_from_cache(slug)
+    if not model:
+        pop_pending_edit(chat_id, user_id)
+        send_telegram_message(chat_id, f"Model no longer found: {slug}")
+        return True
+
+    old_value = str(model.get(field_name, "") or "")
+    updated_model = set_manual_override(model, field_name, value, telegram_user_name(message))
+    pop_pending_edit(chat_id, user_id)
+
+    response = "\n".join(
+        [
+            "Model updated.",
+            f"Model: {updated_model.get('name')} ({updated_model.get('slug')})",
+            f"Changed field: {field_name}",
+            f"Old value: {old_value or '-'}",
+            f"New value: {value}",
+            "",
+            build_model_message(updated_model),
+        ]
+    )
+    send_telegram_message(chat_id, response, model_fields_keyboard(str(updated_model.get("slug", ""))))
+    return True
+
+
+def callback_chat_id(callback: dict[str, object]) -> str:
+    message = callback.get("message", {})
+    if isinstance(message, dict):
+        return telegram_chat_id(message)
+    return ""
+
+
+def callback_message_id(callback: dict[str, object]) -> str:
+    message = callback.get("message", {})
+    if isinstance(message, dict):
+        return str(message.get("message_id", "") or "")
+    return ""
+
+
+def callback_user_id(callback: dict[str, object]) -> str:
+    user = callback.get("from", {})
+    if isinstance(user, dict):
+        return str(user.get("id", "") or "")
+    return ""
+
+
+def callback_user_name(callback: dict[str, object]) -> str:
+    user = callback.get("from", {})
+    if not isinstance(user, dict):
+        return "there"
+    username = str(user.get("username", "") or "")
+    if username:
+        return "@" + username
+    return str(user.get("first_name", "") or "there")
+
+
+def handle_telegram_callback(callback: dict[str, object]) -> None:
+    callback_id = str(callback.get("id", "") or "")
+    data = str(callback.get("data", "") or "")
+    chat_id = callback_chat_id(callback)
+    message_id = callback_message_id(callback)
+    user_id = callback_user_id(callback)
+
+    if data == "noop":
+        answer_callback_query(callback_id)
+        return
+
+    if not allowed_telegram_chat(chat_id):
+        answer_callback_query(callback_id, "This chat is not allowed.")
+        return
+
+    if data.startswith("models:"):
+        page_text = data.split(":", 1)[1]
+        page = int(page_text) if page_text.isdigit() or page_text.startswith("-") else 0
+        edit_models_page(chat_id, message_id, page)
+        answer_callback_query(callback_id)
+        return
+
+    if data.startswith("model:"):
+        parts = data.split(":")
+        slug = parts[1] if len(parts) > 1 else ""
+        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        edit_model_field_selector(chat_id, message_id, slug, page)
+        answer_callback_query(callback_id)
+        return
+
+    if data.startswith("field:"):
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            answer_callback_query(callback_id, "Invalid button.")
+            return
+
+        slug = parts[1]
+        field_name = parts[2]
+        model = resolve_model_from_cache(slug)
+        if not model or field_name not in BUTTON_EDIT_FIELDS:
+            answer_callback_query(callback_id, "Invalid model or field.")
+            return
+
+        set_pending_edit(chat_id, user_id, slug, field_name)
+        prompt = "\n".join(
+            [
+                f"{callback_user_name(callback)}, editing {model.get('name')} -> {field_label(field_name)}.",
+                field_prompt(field_name),
+                "",
+                "Reply to this message with the new value, or send /cancel.",
+            ]
+        )
+        send_telegram_message(
+            chat_id,
+            prompt,
+            {
+                "force_reply": True,
+                "selective": True,
+                "input_field_placeholder": "New price or PDF link",
+            },
+        )
+        answer_callback_query(callback_id, "Waiting for your reply.")
+        return
+
+    answer_callback_query(callback_id, "Unknown button.")
+
+
 def handle_telegram_update(update: dict[str, object]) -> None:
+    callback = update.get("callback_query")
+    if isinstance(callback, dict):
+        handle_telegram_callback(callback)
+        return
+
     message, text = telegram_message_text(update)
     if not message or not text:
         return
 
     chat_id = telegram_chat_id(message)
+    if handle_pending_edit_message(message, text):
+        return
+
     command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
     args_text = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
 
@@ -506,11 +833,13 @@ def handle_telegram_update(update: dict[str, object]) -> None:
     if command in {"/help", "/start"}:
         send_telegram_message(chat_id, command_help_text())
     elif command == "/models":
-        send_telegram_message(chat_id, model_slugs_text())
+        send_models_page(chat_id, 0)
     elif command == "/get":
         send_telegram_message(chat_id, handle_get_command(args_text))
     elif command == "/change":
         send_telegram_message(chat_id, handle_change_command(args_text, message))
+    elif command == "/cancel":
+        send_telegram_message(chat_id, "There is no pending Kia model edit for you.")
     else:
         send_telegram_message(chat_id, "Unknown command. Use /help.")
 
